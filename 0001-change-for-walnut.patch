@@ -1,0 +1,433 @@
+From e44166833f88d9e563f54d8ead59363ca33c0a2a Mon Sep 17 00:00:00 2001
+From: liguang <guang.li@godinsec.com>
+Date: Fri, 17 Jul 2015 17:33:57 +0800
+Subject: [PATCH] change for walnut
+
+Change-Id: I622098512aa3a650c68466ef564f7ed11d3aae06
+Signed-off-by: liguang <guang.li@godinsec.com>
+---
+ include/log/logger.h   |   2 +
+ libcutils/uevent.c     |   2 +-
+ liblog/log_read_kern.c |  15 ++-
+ logcat/logcat.cpp      |  11 ++-
+ rootdir/init.rc        | 244 +++++++++++++++++++++++++------------------------
+ 5 files changed, 154 insertions(+), 120 deletions(-)
+
+diff --git a/include/log/logger.h b/include/log/logger.h
+index 53be1d3..6b0c4eb 100644
+--- a/include/log/logger.h
++++ b/include/log/logger.h
+@@ -145,6 +145,8 @@ int android_logger_set_log_size(struct logger *logger, unsigned long size);
+ long android_logger_get_log_readable_size(struct logger *logger);
+ int android_logger_get_log_version(struct logger *logger);
+ 
++void android_logger_set_ns(char is_ns, char *ns_name);
++
+ struct logger_list;
+ 
+ ssize_t android_logger_get_statistics(struct logger_list *logger_list,
+diff --git a/libcutils/uevent.c b/libcutils/uevent.c
+index 97a81e3..30d6988 100644
+--- a/libcutils/uevent.c
++++ b/libcutils/uevent.c
+@@ -101,7 +101,7 @@ int uevent_open_socket(int buf_sz, bool passcred)
+ 
+     memset(&addr, 0, sizeof(addr));
+     addr.nl_family = AF_NETLINK;
+-    addr.nl_pid = getpid();
++    addr.nl_pid = 0;
+     addr.nl_groups = 0xffffffff;
+ 
+     s = socket(PF_NETLINK, SOCK_DGRAM, NETLINK_KOBJECT_UEVENT);
+diff --git a/liblog/log_read_kern.c b/liblog/log_read_kern.c
+index 41b8a51..d18e8a4 100644
+--- a/liblog/log_read_kern.c
++++ b/liblog/log_read_kern.c
+@@ -56,6 +56,8 @@ typedef char bool;
+ #define __unused __attribute__((unused))
+ #endif
+ 
++static bool sp_is_ns = false;
++static char *sp_ns_name = NULL;
+ /* In the future, we would like to make this list extensible */
+ static const char *LOG_NAME[LOG_ID_MAX] = {
+     [LOG_ID_MAIN] = "main",
+@@ -84,6 +86,7 @@ static int accessmode(int mode)
+     return R_OK;
+ }
+ 
++#define SP_LOG_DIR "/data/cells/"
+ /* repeated fragment */
+ static int check_allocate_accessible(char **n, const char *b, int mode)
+ {
+@@ -93,7 +96,11 @@ static int check_allocate_accessible(char **n, const char *b, int mode)
+         return -EINVAL;
+     }
+ 
+-    asprintf(n, LOG_FILE_DIR "%s", b);
++    if (sp_is_ns) {
++        asprintf(n, SP_LOG_DIR "%s/" LOG_FILE_DIR "%s", sp_ns_name, b);
++    } else {
++        asprintf(n, LOG_FILE_DIR "%s", b);
++    }
+     if (!*n) {
+         return -1;
+     }
+@@ -159,6 +166,12 @@ struct logger {
+     struct listnode log_list;
+ };
+ 
++void android_logger_set_ns(bool is_ns, char *ns_name)
++{
++    sp_is_ns = is_ns;
++    sp_ns_name = ns_name;
++}
++
+ /* android_logger_alloc unimplemented, no use case */
+ /* android_logger_free not exported */
+ static void android_logger_free(struct logger *logger)
+diff --git a/logcat/logcat.cpp b/logcat/logcat.cpp
+index 858e56c..d237d1b 100644
+--- a/logcat/logcat.cpp
++++ b/logcat/logcat.cpp
+@@ -27,6 +27,8 @@
+ #define DEFAULT_MAX_ROTATED_LOGS 4
+ 
+ static AndroidLogFormat * g_logformat;
++static bool is_ns = false;
++static char *ns_name = NULL;
+ 
+ /* logd prefixes records with a length field */
+ #define RECORD_LENGTH_FIELD_SIZE_BYTES sizeof(uint32_t)
+@@ -219,6 +221,7 @@ static void show_help(const char *cmd)
+                     "  -f <filename>   Log to file. Default to stdout\n"
+                     "  -r [<kbytes>]   Rotate log every kbytes. (16 if unspecified). Requires -f\n"
+                     "  -n <count>      Sets max number of rotated logs to <count>, default 4\n"
++                    "  -N <ns_name>    read ns_name's log buffer\n"
+                     "  -v <format>     Sets the log print format, where <format> is one of:\n\n"
+                     "                  brief process tag thread raw time threadtime long\n\n"
+                     "  -c              clear (flush) the entire log and exit\n"
+@@ -339,7 +342,7 @@ int main(int argc, char **argv)
+     for (;;) {
+         int ret;
+ 
+-        ret = getopt(argc, argv, "cdt:T:gG:sQf:r:n:v:b:BSpP:");
++        ret = getopt(argc, argv, "cdt:T:gG:sQf:r:n:v:b:BSpP:N:");
+ 
+         if (ret < 0) {
+             break;
+@@ -535,6 +538,11 @@ int main(int argc, char **argv)
+                 android::g_maxRotatedLogs = atoi(optarg);
+             break;
+ 
++            case 'N':
++                is_ns = true;
++                ns_name = optarg;
++            break;
++
+             case 'v':
+                 err = setLogFormat (optarg);
+                 if (err < 0) {
+@@ -700,6 +708,7 @@ int main(int argc, char **argv)
+     } else {
+         logger_list = android_logger_list_alloc(mode, tail_lines, 0);
+     }
++    android_logger_set_ns(is_ns, ns_name);
+     while (dev) {
+         dev->logger_list = logger_list;
+         dev->logger = android_logger_open(logger_list,
+diff --git a/rootdir/init.rc b/rootdir/init.rc
+index cbcb842..3ecb128 100644
+--- a/rootdir/init.rc
++++ b/rootdir/init.rc
+@@ -7,7 +7,7 @@
+ import /init.environ.rc
+ import /init.usb.rc
+ import /init.${ro.hardware}.rc
+-import /init.${ro.zygote}.rc
++##import /init.${ro.zygote}.rc
+ import /init.trace.rc
+ 
+ on early-init
+@@ -479,21 +479,21 @@ service logd /system/bin/logd
+     socket logdw dgram 0222 logd logd
+     seclabel u:r:logd:s0
+ 
+-service healthd /sbin/healthd
+-    class core
+-    critical
+-    seclabel u:r:healthd:s0
++#service healthd /sbin/healthd
++#    class core
++#    critical
++#    seclabel u:r:healthd:s0
+ 
+-service console /system/bin/sh
+-    class core
+-    console
+-    disabled
+-    user shell
+-    group shell log
+-    seclabel u:r:shell:s0
++#service console /system/bin/sh
++#    class core
++#    console
++#    disabled
++#    user shell
++#    group shell log
++#    seclabel u:r:shell:s0
+ 
+-on property:ro.debuggable=1
+-    start console
++#on property:ro.debuggable=1
++#    start console
+ 
+ # adbd is controlled via property triggers in init.<platform>.usb.rc
+ service adbd /sbin/adbd --root_seclabel=u:r:su:s0
+@@ -503,87 +503,87 @@ service adbd /sbin/adbd --root_seclabel=u:r:su:s0
+     seclabel u:r:adbd:s0
+ 
+ # adbd on at boot in emulator
+-on property:ro.kernel.qemu=1
+-    start adbd
+-
+-service lmkd /system/bin/lmkd
+-    class core
+-    critical
+-    socket lmkd seqpacket 0660 system system
+-
+-service servicemanager /system/bin/servicemanager
+-    class core
+-    user system
+-    group system
+-    critical
+-    onrestart restart healthd
+-    onrestart restart zygote
+-    onrestart restart media
+-    onrestart restart surfaceflinger
+-    onrestart restart drm
++#on property:ro.kernel.qemu=1
++#    start adbd
++#
++#service lmkd /system/bin/lmkd
++#    class core
++#    critical
++#    socket lmkd seqpacket 0660 system system
++#
++#service servicemanager /system/bin/servicemanager
++#    class core
++#    user system
++#    group system
++#    critical
++#    onrestart restart healthd
++#    onrestart restart zygote
++#    onrestart restart media
++#    onrestart restart surfaceflinger
++#    onrestart restart drm
+ 
+ service vold /system/bin/vold
+     class core
+     socket vold stream 0660 root mount
+     ioprio be 2
+-
+-service netd /system/bin/netd
+-    class main
+-    socket netd stream 0660 root system
+-    socket dnsproxyd stream 0660 root inet
+-    socket mdns stream 0660 root system
+-    socket fwmarkd stream 0660 root inet
+-
+-service debuggerd /system/bin/debuggerd
+-    class main
+-
+-service debuggerd64 /system/bin/debuggerd64
+-    class main
+-
+-service ril-daemon /system/bin/rild
+-    class main
+-    socket rild stream 660 root radio
+-    socket rild-debug stream 660 radio system
+-    user root
+-    group radio cache inet misc audio log
+-
+-service surfaceflinger /system/bin/surfaceflinger
+-    class core
+-    user system
+-    group graphics drmrpc
+-    onrestart restart zygote
+-
+-service drm /system/bin/drmserver
+-    class main
+-    user drm
+-    group drm system inet drmrpc
+-
+-service media /system/bin/mediaserver
+-    class main
+-    user media
+-    group audio camera inet net_bt net_bt_admin net_bw_acct drmrpc mediadrm
+-    ioprio rt 4
++#
++#service netd /system/bin/netd
++#    class main
++#    socket netd stream 0660 root system
++#    socket dnsproxyd stream 0660 root inet
++#    socket mdns stream 0660 root system
++#    socket fwmarkd stream 0660 root inet
++#
++#service debuggerd /system/bin/debuggerd
++#    class main
++#
++#service debuggerd64 /system/bin/debuggerd64
++#    class main
++#
++#service ril-daemon /system/bin/rild
++#    class main
++#    socket rild stream 660 root radio
++#    socket rild-debug stream 660 radio system
++#    user root
++#    group radio cache inet misc audio log
++
++#service surfaceflinger /system/bin/surfaceflinger
++#    class core
++#    user system
++#    group graphics drmrpc
++#    onrestart restart zygote
++#
++#service drm /system/bin/drmserver
++#    class main
++#    user drm
++#    group drm system inet drmrpc
++#
++#service media /system/bin/mediaserver
++#    class main
++#    user media
++#    group audio camera inet net_bt net_bt_admin net_bw_acct drmrpc mediadrm
++#    ioprio rt 4
+ 
+ # One shot invocation to deal with encrypted volume.
+-service defaultcrypto /system/bin/vdc --wait cryptfs mountdefaultencrypted
+-    disabled
+-    oneshot
++#service defaultcrypto /system/bin/vdc --wait cryptfs mountdefaultencrypted
++#    disabled
++#    oneshot
+     # vold will set vold.decrypt to trigger_restart_framework (default
+     # encryption) or trigger_restart_min_framework (other encryption)
+ 
+ # One shot invocation to encrypt unencrypted volumes
+-service encrypt /system/bin/vdc --wait cryptfs enablecrypto inplace default
+-    disabled
+-    oneshot
++#service encrypt /system/bin/vdc --wait cryptfs enablecrypto inplace default
++#    disabled
++#    oneshot
+     # vold will set vold.decrypt to trigger_restart_framework (default
+     # encryption)
+ 
+-service bootanim /system/bin/bootanimation
+-    class core
+-    user graphics
+-    group graphics audio
+-    disabled
+-    oneshot
++#service bootanim /system/bin/bootanimation
++#    class core
++#    user graphics
++#    group graphics audio
++#    disabled
++#    oneshot
+ 
+ service installd /system/bin/installd
+     class main
+@@ -594,42 +594,52 @@ service flash_recovery /system/bin/install-recovery.sh
+     seclabel u:r:install_recovery:s0
+     oneshot
+ 
+-service racoon /system/bin/racoon
+-    class main
+-    socket racoon stream 600 system system
+-    # IKE uses UDP port 500. Racoon will setuid to vpn after binding the port.
+-    group vpn net_admin inet
+-    disabled
+-    oneshot
+-
+-service mtpd /system/bin/mtpd
+-    class main
+-    socket mtpd stream 600 system system
+-    user vpn
+-    group vpn net_admin inet net_raw
+-    disabled
+-    oneshot
+-
+-service keystore /system/bin/keystore /data/misc/keystore
+-    class main
+-    user keystore
+-    group keystore drmrpc
+-
+-service dumpstate /system/bin/dumpstate -s
+-    class main
+-    socket dumpstate stream 0660 shell log
+-    disabled
+-    oneshot
+-
+-service mdnsd /system/bin/mdnsd
+-    class main
+-    user mdnsr
+-    group inet net_raw
+-    socket mdnsd stream 0660 mdnsr inet
+-    disabled
+-    oneshot
++service walnutd /system/bin/walnutd -F -a -r
++    class core
++    user root
++    group root
+ 
+-service pre-recovery /system/bin/uncrypt
++service walnutwitch /system/bin/walnut next
+     class main
+-    disabled
+     oneshot
++    keycodes 115 114
++
++#service racoon /system/bin/racoon
++#    class main
++#    socket racoon stream 600 system system
++#    # IKE uses UDP port 500. Racoon will setuid to vpn after binding the port.
++#    group vpn net_admin inet
++#    disabled
++#    oneshot
++#
++#service mtpd /system/bin/mtpd
++#    class main
++#    socket mtpd stream 600 system system
++#    user vpn
++#    group vpn net_admin inet net_raw
++#    disabled
++#    oneshot
++#
++#service keystore /system/bin/keystore /data/misc/keystore
++#    class main
++#    user keystore
++#    group keystore drmrpc
++#
++#service dumpstate /system/bin/dumpstate -s
++#    class main
++#    socket dumpstate stream 0660 shell log
++#    disabled
++#    oneshot
++#
++#service mdnsd /system/bin/mdnsd
++#    class main
++#    user mdnsr
++#    group inet net_raw
++#    socket mdnsd stream 0660 mdnsr inet
++#    disabled
++#    oneshot
++#
++#service pre-recovery /system/bin/uncrypt
++#    class main
++#    disabled
++#    oneshot
+-- 
+2.1.4
+

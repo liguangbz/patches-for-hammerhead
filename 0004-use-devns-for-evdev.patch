@@ -1,0 +1,399 @@
+From cd0185050fa659e64c61f046fb04c92b2be38cc4 Mon Sep 17 00:00:00 2001
+From: liguang <guang.li@godinsec.com>
+Date: Wed, 17 Jun 2015 15:16:43 +0800
+Subject: [PATCH 4/8] use devns for evdev
+
+Signed-off-by: liguang <guang.li@godinsec.com>
+---
+ drivers/input/evdev.c | 255 +++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 253 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/input/evdev.c b/drivers/input/evdev.c
+index 48baf6f..e3e9a29 100644
+--- a/drivers/input/evdev.c
++++ b/drivers/input/evdev.c
+@@ -24,8 +24,15 @@
+ #include <linux/major.h>
+ #include <linux/device.h>
+ #include <linux/wakelock.h>
++#include <linux/dev_namespace.h>
+ #include "input-compat.h"
+ 
++struct evdev_dev_ns {
++       struct mutex mutex;
++       struct list_head clients;
++       struct dev_ns_info dev_ns_info;
++};
++
+ struct evdev {
+ 	int open;
+ 	int minor;
+@@ -54,12 +61,214 @@ struct evdev_client {
+ 	struct list_head node;
+ 	int clkid;
+ 	unsigned int bufsize;
++        struct evdev_dev_ns *evdev_ns;
++        struct list_head list;
++        struct list_head keys_down;
++        bool grab;
+ 	struct input_event buffer[];
+ };
+ 
+ static struct evdev *evdev_table[EVDEV_MINORS];
+ static DEFINE_MUTEX(evdev_table_mutex);
+ 
++static struct notifier_block evdev_ns_switch_notifier;
++static int evdev_grab(struct evdev *evdev, struct evdev_client *client);
++static int evdev_ungrab(struct evdev *evdev, struct evdev_client *client);
++static void evdev_pass_event(struct evdev_client *client,
++                             struct input_event *event,
++                             ktime_t mono, ktime_t real);
++struct keydown {
++        u16 code;
++        struct list_head link;
++};
++
++static void set_keydown(struct evdev_client *client, u16 code)
++{
++        struct keydown *kd;
++        list_for_each_entry(kd, &client->keys_down, link) {
++                if (kd->code == code)
++                        return;
++        }
++        kd = kmalloc(sizeof(*kd), GFP_ATOMIC);
++        if (!kd)
++                return;
++        kd->code = code;
++        list_add(&kd->link, &client->keys_down);
++}
++
++static void clear_keydown(struct evdev_client *client, u16 code)
++{
++        struct keydown *kd, *n;
++        list_for_each_entry_safe(kd, n, &client->keys_down, link) {
++                if (kd->code == code) {
++                        list_del(&kd->link);
++                        kfree(kd);
++                        return;
++                }
++        }
++}
++
++DEFINE_DEV_NS_INFO(evdev);
++
++static bool evdev_client_is_active(struct evdev_client *client)
++{
++       return is_active_dev_ns(client->evdev_ns->dev_ns_info.dev_ns);
++}
++
++static struct dev_ns_info *evdev_devns_create(struct dev_namespace *dev_ns)
++{
++        struct evdev_dev_ns *evdev_ns;
++        struct dev_ns_info *dev_ns_info;
++
++        evdev_ns = kzalloc(sizeof(*evdev_ns), GFP_KERNEL);
++        if (!evdev_ns)
++               return ERR_PTR(-ENOMEM);
++
++        mutex_init(&evdev_ns->mutex);
++        INIT_LIST_HEAD(&evdev_ns->clients);
++
++        pr_info("new evdev_dev_ns %p (d %p)\n", evdev_ns, dev_ns);
++
++        dev_ns_info = &evdev_ns->dev_ns_info;
++
++        dev_ns_info->nb = evdev_ns_switch_notifier;
++        dev_ns_register_notify(dev_ns, &dev_ns_info->nb);
++
++        return &evdev_ns->dev_ns_info;
++}
++
++static void evdev_devns_release(struct dev_ns_info *dev_ns_info)
++{
++        struct evdev_dev_ns *evdev_ns;
++
++        evdev_ns = container_of(dev_ns_info, struct evdev_dev_ns, dev_ns_info);
++
++        pr_info("del evdev_dev_ns %p (d %p)\n", evdev_ns, dev_ns_info->dev_ns);
++        dev_ns_unregister_notify(dev_ns_info->dev_ns, &dev_ns_info->nb);
++
++        kfree(evdev_ns);
++}
++
++static struct dev_ns_ops evdev_ns_ops = {
++        .create = evdev_devns_create,
++        .release = evdev_devns_release,
++};
++
++static int evdev_ns_track_client(struct evdev_client *client)
++{
++        struct evdev_dev_ns *evdev_ns;
++
++        evdev_ns = get_evdev_ns_cur();
++        if (!evdev_ns)
++                return -ENOMEM;
++
++        pr_info("track new client 0x%p in evdev_ns 0x%p (dev_ns 0x%p)\n",
++                client, evdev_ns, evdev_ns->dev_ns_info.dev_ns);
++
++        client->evdev_ns = evdev_ns;
++        client->grab = false;
++        INIT_LIST_HEAD(&client->keys_down);
++
++        mutex_lock(&evdev_ns->mutex);
++        list_add(&client->list, &evdev_ns->clients);
++        mutex_unlock(&evdev_ns->mutex);
++
++        return 0;
++}
++
++static void evdev_ns_untrack_client(struct evdev_client *client)
++{
++        struct evdev_dev_ns *evdev_ns;
++
++        evdev_ns = client->evdev_ns;
++
++        pr_info("untrack client 0x%p in evdev_ns 0x%p (dev_ns 0x%p)\n",
++                client, evdev_ns, evdev_ns->dev_ns_info.dev_ns);
++
++        mutex_lock(&evdev_ns->mutex);
++        list_del(&client->list);
++        mutex_unlock(&evdev_ns->mutex);
++        put_evdev_ns(evdev_ns);
++}
++
++#define evdev_p_code(t, c, v) {\
++                ktime_get_ts(&ts);                                                                      \
++                event.time.tv_sec = ts.tv_sec;                                          \
++                event.time.tv_usec = (ts.tv_nsec / NSEC_PER_USEC);      \
++                event.type = t;                                                                 \
++                event.code = c;                                                                 \
++                event.value = v;                                                                \
++                evdev_pass_event(client, &event);                                       \
++        }
++
++/* dev_ns and resepctive fb_dev_ns protected by caller */
++static int evdev_ns_switch_callback(struct notifier_block *self,
++                                    unsigned long action, void *data)
++{
++        struct dev_namespace *dev_ns = data;
++        struct evdev_dev_ns *evdev_ns;
++        struct evdev_client *client;
++        struct keydown *kd, *n;
++        struct input_event event;
++        struct evdev *evdev;
++        ktime_t time_mono, time_real;
++
++        evdev_ns = find_evdev_ns(dev_ns);
++        WARN(evdev_ns == NULL, "devns 0x%p: no matching evdev_ns\n", dev_ns);
++
++        mutex_lock(&evdev_ns->mutex);
++
++        switch (action) {
++        case DEV_NS_EVENT_ACTIVATE:
++                list_for_each_entry(client, &evdev_ns->clients, list)
++                {
++                        mutex_lock(&client->evdev->mutex);
++                        if (client->grab)
++                                evdev_grab(client->evdev, client);
++                        mutex_unlock(&client->evdev->mutex);
++                }
++                break;
++        case DEV_NS_EVENT_DEACTIVATE:
++                event.type = EV_KEY;
++                event.value = 0;
++                event.code = 0;
++                list_for_each_entry(client, &evdev_ns->clients, list)
++                {
++                        evdev = client->evdev;
++                        if (evdev->hw_ts_sec != -1 && evdev->hw_ts_nsec != -1)
++                                time_mono = ktime_set(evdev->hw_ts_sec, evdev->hw_ts_nsec);
++                        else
++                                time_mono = ktime_get();
++                        time_real = ktime_sub(time_mono, ktime_get_monotonic_offset());
++                        /* release any pressed keys in the inactive client */
++                        list_for_each_entry_safe(kd, n,
++                                                 &client->keys_down, link) {
++                                event.code = kd->code;
++                                pr_info("sending code %d KEY_UP to %s",
++                                        kd->code, dev_ns->tag);
++                                evdev_pass_event(client, &event, time_mono, time_real);
++                        }
++                        if (event.code) {
++                                event.type = EV_SYN;
++                                event.code = SYN_REPORT;
++                                evdev_pass_event(client, &event, time_mono, time_real);
++                                wake_up_interruptible(&client->evdev->wait);
++                        }
++                        mutex_lock(&client->evdev->mutex);
++                        if (client->evdev->grab == client)
++                                evdev_ungrab(client->evdev, client);
++                        mutex_unlock(&client->evdev->mutex);
++                }
++                break;
++        }
++        mutex_unlock(&evdev_ns->mutex);
++        return 0;
++}
++
++static struct notifier_block evdev_ns_switch_notifier = {
++        .notifier_call = evdev_ns_switch_callback,
++};
++
+ static void evdev_pass_event(struct evdev_client *client,
+ 			     struct input_event *event,
+ 			     ktime_t mono, ktime_t real)
+@@ -97,6 +306,13 @@ static void evdev_pass_event(struct evdev_client *client,
+ 		kill_fasync(&client->fasync, SIGIO, POLL_IN);
+ 	}
+ 
++        if (event->type == EV_KEY) {
++                if (event->value == EV_KEY)
++                        set_keydown(client, event->code);
++                else
++                        clear_keydown(client, event->code);
++        }
++
+ 	spin_unlock(&client->buffer_lock);
+ }
+ 
+@@ -138,8 +354,11 @@ static void evdev_event(struct input_handle *handle,
+ 	if (client)
+ 		evdev_pass_event(client, &event, time_mono, time_real);
+ 	else
+-		list_for_each_entry_rcu(client, &evdev->client_list, node)
++		list_for_each_entry_rcu(client, &evdev->client_list, node) {
++                        if (!evdev_client_is_active(client))
++                            continue;
+ 			evdev_pass_event(client, &event, time_mono, time_real);
++                }
+ 
+ 	rcu_read_unlock();
+ 
+@@ -199,6 +418,8 @@ static int evdev_grab(struct evdev *evdev, struct evdev_client *client)
+ 	if (error)
+ 		return error;
+ 
++        client->grab = true;
++
+ 	rcu_assign_pointer(evdev->grab, client);
+ 
+ 	return 0;
+@@ -208,6 +429,7 @@ static int evdev_ungrab(struct evdev *evdev, struct evdev_client *client)
+ {
+ 	if (evdev->grab != client)
+ 		return  -EINVAL;
++        client->grab = false;
+ 
+ 	rcu_assign_pointer(evdev->grab, NULL);
+ 	synchronize_rcu();
+@@ -289,6 +511,8 @@ static int evdev_release(struct inode *inode, struct file *file)
+ 		evdev_ungrab(evdev, client);
+ 	mutex_unlock(&evdev->mutex);
+ 
++        evdev_ns_untrack_client(client);
++
+ 	evdev_detach_client(evdev, client);
+ 	if (client->use_wake_lock)
+ 		wake_lock_destroy(&client->wake_lock);
+@@ -344,9 +568,15 @@ static int evdev_open(struct inode *inode, struct file *file)
+ 	client->clkid = CLOCK_MONOTONIC;
+ 	client->bufsize = bufsize;
+ 	spin_lock_init(&client->buffer_lock);
+-	snprintf(client->name, sizeof(client->name), "%s-%d",
++	i = snprintf(client->name, sizeof(client->name), "%s-%d",
+ 			dev_name(&evdev->dev), task_tgid_vnr(current));
++        snprintf(client->name + i, sizeof(client->name) - i, "[ns:%d]",
++                 dev_ns_init_pid(current_dev_ns()));
+ 	client->evdev = evdev;
++        error = evdev_ns_track_client(client);
++        if (error)
++                goto err_free_client;
++
+ 	evdev_attach_client(evdev, client);
+ 
+ 	error = evdev_open_device(evdev);
+@@ -360,6 +590,7 @@ static int evdev_open(struct inode *inode, struct file *file)
+ 
+  err_free_client:
+ 	evdev_detach_client(evdev, client);
++        evdev_ns_untrack_client(client);
+ 	kfree(client);
+  err_put_evdev:
+ 	put_device(&evdev->dev);
+@@ -392,6 +623,8 @@ static ssize_t evdev_write(struct file *file, const char __user *buffer,
+ 			goto out;
+ 		}
+ 		retval += input_event_size();
++                if (!evdev_client_is_active(client))
++                        continue;
+ 
+ 		input_inject_event(&evdev->handle,
+ 				   event.type, event.code, event.value);
+@@ -758,12 +991,17 @@ static long evdev_do_ioctl(struct file *file, unsigned int cmd,
+ 		if (get_user(v, ip + 1))
+ 			return -EFAULT;
+ 
++                if (!evdev_client_is_active(client))
++                        return 0;
++
+ 		input_inject_event(&evdev->handle, EV_REP, REP_DELAY, u);
+ 		input_inject_event(&evdev->handle, EV_REP, REP_PERIOD, v);
+ 
+ 		return 0;
+ 
+ 	case EVIOCRMFF:
++                if (!evdev_client_is_active(client))
++                        return 0;
+ 		return input_ff_erase(dev, (int)(unsigned long) p, file);
+ 
+ 	case EVIOCGEFFECTS:
+@@ -774,6 +1012,13 @@ static long evdev_do_ioctl(struct file *file, unsigned int cmd,
+ 		return 0;
+ 
+ 	case EVIOCGRAB:
++                if (!evdev_client_is_active(client)) {
++                       if (p)
++                               client->grab = true;
++                       else
++                               client->grab = false;
++                       return 0;
++                }
+ 		if (p)
+ 			return evdev_grab(evdev, client);
+ 		else
+@@ -791,6 +1036,8 @@ static long evdev_do_ioctl(struct file *file, unsigned int cmd,
+ 		return evdev_handle_get_keycode(dev, p);
+ 
+ 	case EVIOCSKEYCODE:
++                if (!evdev_client_is_active(client))
++                        return 0;
+ 		return evdev_handle_set_keycode(dev, p);
+ 
+ 	case EVIOCGKEYCODE_V2:
+@@ -844,6 +1091,8 @@ static long evdev_do_ioctl(struct file *file, unsigned int cmd,
+ 		return str_to_user(dev->uniq, size, p);
+ 
+ 	case EVIOC_MASK_SIZE(EVIOCSFF):
++                if (!evdev_client_is_active(client))
++                        return 0;
+ 		if (input_ff_effect_from_user(p, size, &effect))
+ 			return -EFAULT;
+ 
+@@ -1115,11 +1364,13 @@ static struct input_handler evdev_handler = {
+ 
+ static int __init evdev_init(void)
+ {
++        DEV_NS_REGISTER(evdev, "evdev");
+ 	return input_register_handler(&evdev_handler);
+ }
+ 
+ static void __exit evdev_exit(void)
+ {
++        DEV_NS_UNREGISTER(evdev);
+ 	input_unregister_handler(&evdev_handler);
+ }
+ 
+-- 
+2.1.4
+

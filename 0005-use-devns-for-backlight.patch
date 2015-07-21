@@ -1,0 +1,49 @@
+From ea2c291718c29f5c5947a3f9e7d90e1fade87f04 Mon Sep 17 00:00:00 2001
+From: liguang <guang.li@godinsec.com>
+Date: Thu, 18 Jun 2015 09:47:48 +0800
+Subject: [PATCH 5/8] use devns for backlight
+
+Signed-off-by: liguang <guang.li@godinsec.com>
+---
+ drivers/video/backlight/backlight.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/drivers/video/backlight/backlight.c b/drivers/video/backlight/backlight.c
+index bf5b1ec..ceac09d 100644
+--- a/drivers/video/backlight/backlight.c
++++ b/drivers/video/backlight/backlight.c
+@@ -14,6 +14,7 @@
+ #include <linux/err.h>
+ #include <linux/fb.h>
+ #include <linux/slab.h>
++#include <linux/dev_namespace.h>
+ 
+ #ifdef CONFIG_PMAC_BACKLIGHT
+ #include <asm/backlight.h>
+@@ -121,6 +122,11 @@ static ssize_t backlight_store_power(struct device *dev,
+ 		return rc;
+ 
+ 	rc = -ENXIO;
++
++        if (!is_active_dev_ns(current_dev_ns())) {
++                printk(KERN_INFO"forbid backlight power setting, you are inactive ns.\n");
++                return count;
++        }
+ 	mutex_lock(&bd->ops_lock);
+ 	if (bd->ops) {
+ 		pr_debug("backlight: set power to %lu\n", power);
+@@ -156,6 +162,11 @@ static ssize_t backlight_store_brightness(struct device *dev,
+ 
+ 	rc = -ENXIO;
+ 
++        if (!is_active_dev_ns(current_dev_ns())) {
++                printk(KERN_INFO"forbid brightness setting, you are inactive ns.\n");
++                return count;
++        }
++
+ 	mutex_lock(&bd->ops_lock);
+ 	if (bd->ops) {
+ 		if (brightness > bd->props.max_brightness)
+-- 
+2.1.4
+

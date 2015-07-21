@@ -1,0 +1,60 @@
+From 6326590bf725b8954f1391a62faa7594a52a2f00 Mon Sep 17 00:00:00 2001
+From: liguang <guang.li@godinsec.com>
+Date: Wed, 24 Jun 2015 14:31:21 +0800
+Subject: [PATCH 6/8] use devns for suspend & wakelock
+
+Signed-off-by: liguang <guang.li@godinsec.com>
+---
+ kernel/power/suspend.c  | 4 ++++
+ kernel/power/wakelock.c | 6 ++++++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/kernel/power/suspend.c b/kernel/power/suspend.c
+index 172e415..17de910 100644
+--- a/kernel/power/suspend.c
++++ b/kernel/power/suspend.c
+@@ -26,6 +26,7 @@
+ #include <linux/syscore_ops.h>
+ #include <linux/rtc.h>
+ #include <trace/events/power.h>
++#include <linux/dev_namespace.h>
+ 
+ #include "power.h"
+ 
+@@ -327,6 +328,9 @@ int pm_suspend(suspend_state_t state)
+ {
+ 	int error;
+ 
++        if (!is_active_dev_ns(current_dev_ns())) {
++                pr_info("PM: reject suspend from inactive ns");
++        }
+ 	if (state <= PM_SUSPEND_ON || state >= PM_SUSPEND_MAX)
+ 		return -EINVAL;
+ 
+diff --git a/kernel/power/wakelock.c b/kernel/power/wakelock.c
+index c8fba33..eebe038 100644
+--- a/kernel/power/wakelock.c
++++ b/kernel/power/wakelock.c
+@@ -16,6 +16,7 @@
+ #include <linux/list.h>
+ #include <linux/rbtree.h>
+ #include <linux/slab.h>
++#include <linux/dev_namespace.h>
+ 
+ static DEFINE_MUTEX(wakelocks_lock);
+ 
+@@ -188,6 +189,11 @@ int pm_wake_lock(const char *buf)
+ 	size_t len;
+ 	int ret = 0;
+ 
++        if (!is_active_dev_ns(current_dev_ns())) {
++                printk(KERN_ERR"reject wakelock from inactive ns\n");
++                return -EINVAL;
++        }
++
+ 	while (*str && !isspace(*str))
+ 		str++;
+ 
+-- 
+2.1.4
+

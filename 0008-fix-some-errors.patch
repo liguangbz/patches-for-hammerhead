@@ -1,0 +1,319 @@
+From 1db8208a822eae2912650b81e8acb3694be13523 Mon Sep 17 00:00:00 2001
+From: liguang <guang.li@godinsec.com>
+Date: Fri, 17 Jul 2015 16:05:49 +0800
+Subject: [PATCH 8/8] fix some errors
+
+Signed-off-by: liguang <guang.li@godinsec.com>
+---
+ drivers/base/core.c           | 15 ++++++++++
+ drivers/video/fb_devns.c      |  2 +-
+ drivers/video/fbmem.c         |  9 +++---
+ include/linux/dev_namespace.h | 66 ++++++++-----------------------------------
+ kernel/dev_namespace.c        | 35 +++++++++--------------
+ kernel/power/suspend.c        |  2 +-
+ kernel/power/wakelock.c       |  2 +-
+ 7 files changed, 47 insertions(+), 84 deletions(-)
+
+diff --git a/drivers/base/core.c b/drivers/base/core.c
+index e28ce98..c91d481 100644
+--- a/drivers/base/core.c
++++ b/drivers/base/core.c
+@@ -25,6 +25,7 @@
+ #include <linux/mutex.h>
+ #include <linux/async.h>
+ #include <linux/pm_runtime.h>
++#include <linux/dev_namespace.h>
+ 
+ #include "base.h"
+ #include "power/power.h"
+@@ -42,6 +43,20 @@ static __init int sysfs_deprecated_setup(char *arg)
+ early_param("sysfs.deprecated", sysfs_deprecated_setup);
+ #endif
+ 
++struct dev_namespace init_dev_ns = {
++            .active = true,
++            .count = ATOMIC_INIT(2),  /* extra reference for active_dev_ns */
++            .pid_ns = &init_pid_ns,
++            .notifiers = BLOCKING_NOTIFIER_INIT(init_dev_ns.notifiers),
++            .timestamp = 0,
++            .mutex = __MUTEX_INITIALIZER(init_dev_ns.mutex),
++            .info = { NULL },
++};
++EXPORT_SYMBOL_GPL(init_dev_ns);
++
++struct dev_namespace *active_dev_ns = &init_dev_ns;
++EXPORT_SYMBOL_GPL(active_dev_ns);
++
+ int (*platform_notify)(struct device *dev) = NULL;
+ int (*platform_notify_remove)(struct device *dev) = NULL;
+ static struct kobject *dev_kobj;
+diff --git a/drivers/video/fb_devns.c b/drivers/video/fb_devns.c
+index 0721e2c..0d52d59 100644
+--- a/drivers/video/fb_devns.c
++++ b/drivers/video/fb_devns.c
+@@ -251,7 +251,7 @@ bool fb_virt_is_active(struct fb_info *virt)
+ 	BUG_ON(!fb_info_is_virt(virt));
+ 
+ 	fb_ns_info = virt->par;
+-	return is_active_dev_ns(fb_ns_info->fb_ns->dev_ns_info.dev_ns);
++	return is_active_init_dev_ns(fb_ns_info->fb_ns->dev_ns_info.dev_ns);
+ }
+ 
+ /* Given a fb, convert from virt info to HW info (if necessary) */
+diff --git a/drivers/video/fbmem.c b/drivers/video/fbmem.c
+index 6808ac0..d81432a 100644
+--- a/drivers/video/fbmem.c
++++ b/drivers/video/fbmem.c
+@@ -831,7 +831,7 @@ fb_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+ 
+ 	if (info->fbops->fb_write)
+ 		return info->fbops->fb_write(info, buf, count, ppos);
+-	
++
+ 	total_size = info->screen_size;
+ 
+ 	if (total_size == 0)
+@@ -1489,15 +1489,16 @@ fb_release(struct inode *inode, struct file *file)
+ __acquires(&info->lock)
+ __releases(&info->lock)
+ {
+-	struct fb_info * const info = file->private_data;
++        struct fb_info * const virt = file->private_data;
++	struct fb_info * const info = fb_virt_to_info(virt);
+ 
+ 	mutex_lock(&info->lock);
+ 	if (info->fbops->fb_release)
+ 		info->fbops->fb_release(info,1);
+ 	module_put(info->fbops->owner);
+ 	mutex_unlock(&info->lock);
+-        untrack_fb_inode(info, inode);
+-        put_fb_info_ns(info);
++        untrack_fb_inode(virt, inode);
++        put_fb_info_ns(virt);
+ 	put_fb_info(info);
+ 	return 0;
+ }
+diff --git a/include/linux/dev_namespace.h b/include/linux/dev_namespace.h
+index 7aba1c9..17a240c 100644
+--- a/include/linux/dev_namespace.h
++++ b/include/linux/dev_namespace.h
+@@ -26,7 +26,7 @@
+ 
+ #ifdef __KERNEL__
+ 
+-#define DEV_NS_TAG_LEN 4
++#define DEV_NS_TAG_LEN 16
+ #define DEV_NS_DESC_MAX 16
+ 
+ struct dev_namespace;
+@@ -45,6 +45,9 @@ struct dev_namespace {
+ 	struct dev_ns_info *info[DEV_NS_DESC_MAX];
+ };
+ 
++extern struct dev_namespace init_dev_ns;
++extern struct dev_namespace *active_dev_ns;
++
+ struct dev_ns_info {
+ 	struct dev_namespace *dev_ns;
+ 	struct list_head list;
+@@ -61,9 +64,6 @@ struct dev_ns_ops {
+ #define DEV_NS_EVENT_ACTIVATE		0x1
+ #define DEV_NS_EVENT_DEACTIVATE		0x2
+ 
+-extern struct dev_namespace init_dev_ns;
+-extern struct dev_namespace *active_dev_ns;
+-
+ extern void __put_dev_ns(struct dev_namespace *dev_ns);
+ 
+ static inline void put_dev_ns(struct dev_namespace *dev_ns)
+@@ -81,7 +81,8 @@ static inline struct dev_namespace *get_dev_ns(struct dev_namespace *dev_ns)
+ /* return the device namespaces of the current process */
+ static inline struct dev_namespace *current_dev_ns(void)
+ {
+-	BUG_ON(in_interrupt());
++        if (in_interrupt())
++                return &init_dev_ns;
+ 	return current->nsproxy->dev_ns;
+ }
+ 
+@@ -91,6 +92,11 @@ static inline bool is_active_dev_ns(struct dev_namespace *dev_ns)
+ 	return dev_ns->active;
+ }
+ 
++static inline bool is_active_init_dev_ns(struct dev_namespace *dev_ns)
++{
++        return is_active_dev_ns(dev_ns) || (dev_ns == &init_dev_ns) ;
++}
++
+ /* return and get the device namespace of a given task */
+ extern struct dev_namespace *get_dev_ns_by_task(struct task_struct *task);
+ extern struct dev_namespace *get_dev_ns_by_vpid(pid_t vpid);
+@@ -217,55 +223,5 @@ extern void loop_dev_ns_info(int ns_id, void *ptr,
+ #define DEV_NS_UNREGISTER(X) \
+ 	unregister_dev_ns_ops(X ## _ns_id)
+ 
+-
+-#else  /* !CONFIG_DEV_NS */
+-
+-/* appease static assignment in kernel/nsproxy.c */
+-#define init_dev_ns (*(struct dev_namespace *) NULL)
+-
+-/*
+- * Driver authors should use this macro instead if !CONFIG_DEV_NS:
+- * DEFINE_DEV_NS_INIT(X): put_X_ns(), get_X_ns(), get_X_ns_cur()
+- */
+-#define DEFINE_DEV_NS_INIT(x) \
+-	struct x ## _dev_ns init_ ## x ## _ns; \
+-	static inline \
+-	struct x ## _dev_ns *find_ ## x ## _ns(struct dev_namespace *dev_ns) \
+-	{ return &init_ ## x ## _ns; } \
+-	struct x ## _dev_ns *get_ ## x ## _ns(struct dev_namespace *dev_ns) \
+-	{ return &init_ ## x ## _ns; } \
+-	static inline struct x ## _dev_ns *get_ ## x ## _ns_cur(void) \
+-	{ return &init_ ## x ## _ns; } \
+-	static inline void put_ ## x ## _ns(struct x ## _dev_ns *x ## _ns) \
+-	{ /* */ } \
+-        static inline bool is_active_ ## x ##_ns(struct x ## _dev_ns *ns) \
+-        { return true; }
+-
+-static inline struct dev_namespace *current_dev_ns(void)
+-{ return &init_dev_ns; }
+-
+-static inline struct dev_namespace *copy_dev_ns(unsigned long flags,
+-						struct task_struct *task)
+-{
+-	if (flags & CLONE_NEWPID)
+-		return ERR_PTR(-EINVAL);
+-	return task->nsproxy->dev_ns;
+-}
+-
+-static inline pid_t dev_ns_init_pid(struct dev_namespace *dev_ns)
+-{
+-	return init_task.pid;
+-}
+-
+-static inline get_dev_ns_tag(char *to, struct dev_namespace *dev_ns)
+-{
+-	strcpy(to, "");
+-}
+-
+-static inline struct nsproxy *dev_ns_nsproxy(struct dev_namespace *dev_ns)
+-{
+-        return task_nsproxy(dev_ns->pid_ns->child_reaper);
+-}
+-
+ #endif /* __KERNEL__ */
+ #endif /* _LINUX_DEV_NS_H */
+diff --git a/kernel/dev_namespace.c b/kernel/dev_namespace.c
+index d1b5abc..84d0616 100644
+--- a/kernel/dev_namespace.c
++++ b/kernel/dev_namespace.c
+@@ -47,25 +47,9 @@
+ #include <linux/atomic.h>
+ #include <linux/uaccess.h>
+ 
+-
+ /* protects active namespace and switches */
+ static DECLARE_RWSEM(global_dev_ns_lock);
+ 
+-
+-struct dev_namespace init_dev_ns = {
+-	.active = true,
+-	.count = ATOMIC_INIT(2),  /* extra reference for active_dev_ns */
+-	.pid_ns = &init_pid_ns,
+-	.notifiers = BLOCKING_NOTIFIER_INIT(init_dev_ns.notifiers),
+-	.timestamp = 0,
+-	.mutex = __MUTEX_INITIALIZER(init_dev_ns.mutex),
+-};
+-EXPORT_SYMBOL_GPL(init_dev_ns);
+-
+-
+-struct dev_namespace *active_dev_ns = &init_dev_ns;
+-
+-
+ static void dev_ns_lock(struct dev_namespace *dev_ns)
+ {
+ 	mutex_lock(&dev_ns->mutex);
+@@ -79,6 +63,7 @@ static void dev_ns_unlock(struct dev_namespace *dev_ns)
+ static struct dev_namespace *create_dev_ns(struct task_struct *task)
+ {
+ 	struct dev_namespace *dev_ns;
++        static int s_ndev = 0;
+ 
+ 	dev_ns = kzalloc(sizeof(struct dev_namespace), GFP_KERNEL);
+ 	if (!dev_ns)
+@@ -87,6 +72,8 @@ static struct dev_namespace *create_dev_ns(struct task_struct *task)
+ 	atomic_set(&dev_ns->count, 1);
+ 	BLOCKING_INIT_NOTIFIER_HEAD(&dev_ns->notifiers);
+ 	mutex_init(&dev_ns->mutex);
++        snprintf(dev_ns->tag, DEV_NS_TAG_LEN, "dev_ns.%d", ++s_ndev);
++        dev_ns->tag[DEV_NS_TAG_LEN-1] = '\0';
+ 
+ 	dev_ns->pid_ns = get_pid_ns(task->nsproxy->pid_ns);
+ 
+@@ -250,13 +237,13 @@ static struct dev_ns_info *new_dev_ns_info(int dev_ns_id,
+ 	struct dev_ns_desc *desc = &dev_ns_desc[dev_ns_id];
+ 	struct dev_ns_info *dev_ns_info;
+ 
+-	pr_debug("dev_ns: [0x%p] new info %s\n", dev_ns, desc->name);
++	printk(KERN_ERR"dev_ns: [0x%p] new info %s\n", dev_ns, desc->name);
+ 
+ 	dev_ns_info = desc->ops->create(dev_ns);
+-	if (!IS_ERR_OR_NULL(dev_ns_info))
++	if (IS_ERR_OR_NULL(dev_ns_info))
+ 		return NULL;
+ 
+-	pr_debug("dev_ns: [0x%p] got info 0x%p\n", dev_ns, dev_ns_info);
++	printk(KERN_ERR"dev_ns: [0x%p] got info 0x%p\n", dev_ns, dev_ns_info);
+ 
+ 	dev_ns->info[dev_ns_id] = dev_ns_info;
+ 	dev_ns_info->dev_ns = get_dev_ns(dev_ns);
+@@ -331,12 +318,16 @@ struct dev_ns_info *get_dev_ns_info(int dev_ns_id,
+ 
+ struct dev_ns_info *get_dev_ns_info_task(int dev_ns_id, struct task_struct *tsk)
+ {
+-	struct dev_ns_info *dev_ns_info;
++	struct dev_ns_info *dev_ns_info = NULL;
+ 	struct dev_namespace *dev_ns;
+ 
+ 	dev_ns = get_dev_ns_by_task(tsk);
+-	dev_ns_info = dev_ns ? get_dev_ns_info(dev_ns_id, dev_ns, 1, 1) : NULL;
+-	put_dev_ns(dev_ns);
++        printk(KERN_ERR"devns: addr: %p, comm: %s", dev_ns, tsk->comm);
++        if (dev_ns) {
++        printk(KERN_ERR"devns: tag: %s", dev_ns->tag);
++                dev_ns_info = get_dev_ns_info(dev_ns_id, dev_ns, 1, 1);
++                put_dev_ns(dev_ns);
++        }
+ 
+ 	return dev_ns_info;
+ }
+diff --git a/kernel/power/suspend.c b/kernel/power/suspend.c
+index 17de910..b545365 100644
+--- a/kernel/power/suspend.c
++++ b/kernel/power/suspend.c
+@@ -328,7 +328,7 @@ int pm_suspend(suspend_state_t state)
+ {
+ 	int error;
+ 
+-        if (!is_active_dev_ns(current_dev_ns())) {
++        if (!is_active_init_dev_ns(current_dev_ns())) {
+                 pr_info("PM: reject suspend from inactive ns");
+         }
+ 	if (state <= PM_SUSPEND_ON || state >= PM_SUSPEND_MAX)
+diff --git a/kernel/power/wakelock.c b/kernel/power/wakelock.c
+index eebe038..3252062 100644
+--- a/kernel/power/wakelock.c
++++ b/kernel/power/wakelock.c
+@@ -189,7 +189,7 @@ int pm_wake_lock(const char *buf)
+ 	size_t len;
+ 	int ret = 0;
+ 
+-        if (!is_active_dev_ns(current_dev_ns())) {
++        if (!is_active_init_dev_ns(current_dev_ns())) {
+                 printk(KERN_ERR"reject wakelock from inactive ns\n");
+                 return -EINVAL;
+         }
+-- 
+2.1.4
+

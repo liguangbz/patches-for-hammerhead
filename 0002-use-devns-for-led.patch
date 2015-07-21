@@ -1,0 +1,37 @@
+From 88439808a63830c25274efe91747e22e5887e418 Mon Sep 17 00:00:00 2001
+From: liguang <guang.li@godinsec.com>
+Date: Wed, 17 Jun 2015 11:29:55 +0800
+Subject: [PATCH 2/8] use devns for led
+
+Signed-off-by: liguang <guang.li@godinsec.com>
+---
+ drivers/leds/led-class.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/drivers/leds/led-class.c b/drivers/leds/led-class.c
+index a2b2f3d..45487fd 100644
+--- a/drivers/leds/led-class.c
++++ b/drivers/leds/led-class.c
+@@ -20,6 +20,7 @@
+ #include <linux/ctype.h>
+ #include <linux/leds.h>
+ #include "leds.h"
++#include <linux/dev_namespace.h>
+ 
+ #define LED_BUFF_SIZE 50
+ 
+@@ -57,6 +58,11 @@ static ssize_t led_brightness_store(struct device *dev,
+ 	if (count == size) {
+ 		ret = count;
+ 
++                if (!is_active_dev_ns(current_dev_ns())) {
++                        printk(KERN_INFO "led_brightness: not setting %s to %ld from inactive container.\n",
++                        dev_name(dev), state);
++                        return ret;
++                }
+ 		if (state == LED_OFF)
+ 			led_trigger_remove(led_cdev);
+ 		led_set_brightness(led_cdev, state);
+-- 
+2.1.4
+
