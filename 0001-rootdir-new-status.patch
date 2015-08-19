@@ -1,0 +1,200 @@
+From e4efd79afaffee4accea32ef0dd5020c32511a03 Mon Sep 17 00:00:00 2001
+From: liguang <guang.li@godinsec.com>
+Date: Wed, 19 Aug 2015 13:52:22 +0800
+Subject: [PATCH] new status
+
+Change-Id: Idc056da2a5b4216f85f5ff5609858554dd40604c
+Signed-off-by: liguang <guang.li@godinsec.com>
+---
+ rootdir/init.rc | 138 ++++++++++++++++++++++++++++----------------------------
+ 1 file changed, 69 insertions(+), 69 deletions(-)
+
+diff --git a/rootdir/init.rc b/rootdir/init.rc
+index 3ecb128..1c6191a 100644
+--- a/rootdir/init.rc
++++ b/rootdir/init.rc
+@@ -479,18 +479,18 @@ service logd /system/bin/logd
+     socket logdw dgram 0222 logd logd
+     seclabel u:r:logd:s0
+ 
+-#service healthd /sbin/healthd
+-#    class core
+-#    critical
+-#    seclabel u:r:healthd:s0
++service healthd /sbin/healthd
++    class core
++    critical
++    seclabel u:r:healthd:s0
+ 
+-#service console /system/bin/sh
+-#    class core
+-#    console
+-#    disabled
+-#    user shell
+-#    group shell log
+-#    seclabel u:r:shell:s0
++service console /system/bin/sh
++    class core
++    console
++    disabled
++    user shell
++    group shell log
++    seclabel u:r:shell:s0
+ 
+ #on property:ro.debuggable=1
+ #    start console
+@@ -506,10 +506,10 @@ service adbd /sbin/adbd --root_seclabel=u:r:su:s0
+ #on property:ro.kernel.qemu=1
+ #    start adbd
+ #
+-#service lmkd /system/bin/lmkd
+-#    class core
+-#    critical
+-#    socket lmkd seqpacket 0660 system system
++service lmkd /system/bin/lmkd
++    class core
++    critical
++    socket lmkd seqpacket 0660 system system
+ #
+ #service servicemanager /system/bin/servicemanager
+ #    class core
+@@ -526,14 +526,14 @@ service vold /system/bin/vold
+     class core
+     socket vold stream 0660 root mount
+     ioprio be 2
+-#
+-#service netd /system/bin/netd
+-#    class main
+-#    socket netd stream 0660 root system
+-#    socket dnsproxyd stream 0660 root inet
+-#    socket mdns stream 0660 root system
+-#    socket fwmarkd stream 0660 root inet
+-#
++
++service netd /system/bin/netd
++    class main
++    socket netd stream 0660 root system
++    socket dnsproxyd stream 0660 root inet
++    socket mdns stream 0660 root system
++    socket fwmarkd stream 0660 root inet
++
+ #service debuggerd /system/bin/debuggerd
+ #    class main
+ #
+@@ -557,7 +557,7 @@ service vold /system/bin/vold
+ #    class main
+ #    user drm
+ #    group drm system inet drmrpc
+-#
++
+ #service media /system/bin/mediaserver
+ #    class main
+ #    user media
+@@ -565,16 +565,16 @@ service vold /system/bin/vold
+ #    ioprio rt 4
+ 
+ # One shot invocation to deal with encrypted volume.
+-#service defaultcrypto /system/bin/vdc --wait cryptfs mountdefaultencrypted
+-#    disabled
+-#    oneshot
++service defaultcrypto /system/bin/vdc --wait cryptfs mountdefaultencrypted
++    disabled
++    oneshot
+     # vold will set vold.decrypt to trigger_restart_framework (default
+     # encryption) or trigger_restart_min_framework (other encryption)
+ 
+ # One shot invocation to encrypt unencrypted volumes
+-#service encrypt /system/bin/vdc --wait cryptfs enablecrypto inplace default
+-#    disabled
+-#    oneshot
++service encrypt /system/bin/vdc --wait cryptfs enablecrypto inplace default
++    disabled
++    oneshot
+     # vold will set vold.decrypt to trigger_restart_framework (default
+     # encryption)
+ 
+@@ -604,42 +604,42 @@ service walnutwitch /system/bin/walnut next
+     oneshot
+     keycodes 115 114
+ 
+-#service racoon /system/bin/racoon
+-#    class main
+-#    socket racoon stream 600 system system
+-#    # IKE uses UDP port 500. Racoon will setuid to vpn after binding the port.
+-#    group vpn net_admin inet
+-#    disabled
+-#    oneshot
+-#
+-#service mtpd /system/bin/mtpd
+-#    class main
+-#    socket mtpd stream 600 system system
+-#    user vpn
+-#    group vpn net_admin inet net_raw
+-#    disabled
+-#    oneshot
+-#
+-#service keystore /system/bin/keystore /data/misc/keystore
+-#    class main
+-#    user keystore
+-#    group keystore drmrpc
+-#
+-#service dumpstate /system/bin/dumpstate -s
+-#    class main
+-#    socket dumpstate stream 0660 shell log
+-#    disabled
+-#    oneshot
+-#
+-#service mdnsd /system/bin/mdnsd
+-#    class main
+-#    user mdnsr
+-#    group inet net_raw
+-#    socket mdnsd stream 0660 mdnsr inet
+-#    disabled
+-#    oneshot
+-#
+-#service pre-recovery /system/bin/uncrypt
+-#    class main
+-#    disabled
+-#    oneshot
++service racoon /system/bin/racoon
++    class main
++    socket racoon stream 600 system system
++    # IKE uses UDP port 500. Racoon will setuid to vpn after binding the port.
++    group vpn net_admin inet
++    disabled
++    oneshot
++
++service mtpd /system/bin/mtpd
++    class main
++    socket mtpd stream 600 system system
++    user vpn
++    group vpn net_admin inet net_raw
++    disabled
++    oneshot
++
++service keystore /system/bin/keystore /data/misc/keystore
++    class main
++    user keystore
++    group keystore drmrpc
++
++service dumpstate /system/bin/dumpstate -s
++    class main
++    socket dumpstate stream 0660 shell log
++    disabled
++    oneshot
++
++service mdnsd /system/bin/mdnsd
++    class main
++    user mdnsr
++    group inet net_raw
++    socket mdnsd stream 0660 mdnsr inet
++    disabled
++    oneshot
++
++service pre-recovery /system/bin/uncrypt
++    class main
++    disabled
++    oneshot
+-- 
+2.1.4
+
